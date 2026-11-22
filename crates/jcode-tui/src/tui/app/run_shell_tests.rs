@@ -374,6 +374,7 @@ fn the_animation_only_path_refuses_to_run_while_the_command_palette_is_up() {
         force_full_repaint: false,
         composer_changed: false,
         command_palette_visible: false,
+        inline_picker_visible: false,
     };
     assert_eq!(
         idle_animation_fast_path_blocked_reason(&clean_idle_frame),
@@ -401,6 +402,50 @@ fn the_animation_only_path_refuses_to_run_while_the_command_palette_is_up() {
     assert_eq!(
         idle_animation_fast_path_blocked_reason(&typing_into_palette),
         Some("input_changed"),
+    );
+}
+
+/// The same freeze, one overlay over: an inline picker (`/model`, `/login`,
+/// `/accounts`) renders on the palette surface but deliberately empties the
+/// textual suggestion list, so `command_palette_visible` is false while it is
+/// up. Reported from a live session as "the model picker does not respond to
+/// arrow keys": `picker.selected` advanced on every Down while the rendered
+/// marker stayed on row 0, because each keystroke's redraw was served by an
+/// animation-only repaint of a stale frame. Confirmed against a live PTY:
+/// picker state read 0, 1, 2, 3 while the highlighted row never moved.
+#[test]
+fn the_animation_only_path_refuses_to_run_while_an_inline_picker_is_up() {
+    let clean_idle_frame = IdleAnimationFastPathInputs {
+        has_previous_frame: true,
+        animation_active: true,
+        has_animation_area: true,
+        force_full_redraw: false,
+        force_full_repaint: false,
+        composer_changed: false,
+        command_palette_visible: false,
+        inline_picker_visible: false,
+    };
+
+    let picker_open = IdleAnimationFastPathInputs {
+        inline_picker_visible: true,
+        ..clean_idle_frame
+    };
+    assert_eq!(
+        idle_animation_fast_path_blocked_reason(&picker_open),
+        Some("inline_picker_visible"),
+        "an open picker must force full frames so selection changes paint"
+    );
+
+    // The palette guard is checked first when both are reported, so the
+    // reason stays stable for `draw-stats`.
+    let both = IdleAnimationFastPathInputs {
+        command_palette_visible: true,
+        inline_picker_visible: true,
+        ..clean_idle_frame
+    };
+    assert_eq!(
+        idle_animation_fast_path_blocked_reason(&both),
+        Some("command_palette_visible"),
     );
 }
 
