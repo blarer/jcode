@@ -107,6 +107,13 @@ pub(super) fn status_spinner_only_symbol(app: &App) -> Option<&'static str> {
         return None;
     }
 
+    // An inline picker preview (`/model`, `/login`, `/accounts`) draws on the
+    // same floating surface as the palette, but it suppresses the textual
+    // suggestion list, so the check above cannot see it.
+    if inline_picker_overlay_visible(app) {
+        return None;
+    }
+
     if status_uses_primary_spinner(&app.status) {
         Some(jcode_tui_style::theme::activity_indicator(
             status_spinner_elapsed(app),
@@ -139,6 +146,20 @@ pub(crate) fn slash_command_palette_may_be_visible(
     has_suggestions: impl FnOnce() -> bool,
 ) -> bool {
     is_slash_command_input(input) && has_suggestions()
+}
+
+/// Whether an inline picker (`/model`, `/login`, `/accounts`, `/agents`) is on
+/// screen, in preview or focused.
+///
+/// This is a separate predicate from [`slash_command_palette_may_be_visible`]
+/// because an open picker deliberately empties `command_suggestions()` (the
+/// picker *is* the suggestion surface, see `command_suggestions_uncached`).
+/// The palette predicate therefore reports "no palette" for exactly the states
+/// where the largest floating overlay is up, which let the partial-repaint
+/// fast paths reuse a previous frame and freeze the picker on screen: arrow
+/// keys moved `picker.selected` while the highlighted row never changed.
+fn inline_picker_overlay_visible(app: &App) -> bool {
+    app.inline_interactive_state.is_some()
 }
 
 /// Statuses whose full status line starts with the primary green circular spinner.
@@ -232,6 +253,7 @@ struct IdleAnimationFastPathInputs {
     force_full_repaint: bool,
     composer_changed: bool,
     command_palette_visible: bool,
+    inline_picker_visible: bool,
 }
 
 /// Why the animation-only partial repaint must not run, or `None` when it may.
@@ -266,6 +288,14 @@ fn idle_animation_fast_path_blocked_reason(
         // pressing `/` in a fresh session made the menu blink in and out at
         // the chrome full-frame cadence. Stand down until the palette closes.
         Some("command_palette_visible")
+    } else if inputs.inline_picker_visible {
+        // An inline picker (`/model`, `/login`, `/accounts`) floats over the
+        // same rows as the palette, but it empties the textual suggestion
+        // list, so `command_palette_visible` is false while it is up. Without
+        // its own guard, every arrow key inside the picker was "satisfied" by
+        // an animation-only repaint that reused the previous frame, leaving
+        // the highlighted row frozen even though the selection had moved.
+        Some("inline_picker_visible")
     } else {
         None
     }
@@ -353,6 +383,7 @@ impl StatusSpinnerRenderer {
             command_palette_visible: slash_command_palette_may_be_visible(&app.input, || {
                 !app.command_suggestions().is_empty()
             }),
+            inline_picker_visible: inline_picker_overlay_visible(app),
         });
         if let Some(reason) = blocked {
             crate::tui::ui::note_idle_animation_fast_path_blocked(reason);
@@ -1277,6 +1308,7 @@ mod tests {
             force_full_repaint: false,
             composer_changed: false,
             command_palette_visible: false,
+            inline_picker_visible: false,
         };
         assert_eq!(
             idle_animation_fast_path_blocked_reason(&clean_idle_frame),
@@ -1304,6 +1336,51 @@ mod tests {
         assert_eq!(
             idle_animation_fast_path_blocked_reason(&typing_into_palette),
             Some("input_changed"),
+        );
+    }
+
+    /// The same freeze, one overlay over: an inline picker (`/model`,
+    /// `/login`, `/accounts`) renders on the palette surface but deliberately
+    /// empties the textual suggestion list, so `command_palette_visible` is
+    /// false while it is up. Reported from a live session as "the model picker
+    /// does not respond to arrow keys": `picker.selected` advanced on every
+    /// Down while the rendered marker stayed on row 0, because each
+    /// keystroke's redraw was served by an animation-only repaint of a stale
+    /// frame. Confirmed against a live PTY: picker state read 0, 1, 2, 3 while
+    /// the highlighted row never left the first entry.
+    #[test]
+    fn the_animation_only_path_refuses_to_run_while_an_inline_picker_is_up() {
+        let clean_idle_frame = IdleAnimationFastPathInputs {
+            has_previous_frame: true,
+            animation_active: true,
+            has_animation_area: true,
+            force_full_redraw: false,
+            force_full_repaint: false,
+            composer_changed: false,
+            command_palette_visible: false,
+            inline_picker_visible: false,
+        };
+
+        let picker_open = IdleAnimationFastPathInputs {
+            inline_picker_visible: true,
+            ..clean_idle_frame
+        };
+        assert_eq!(
+            idle_animation_fast_path_blocked_reason(&picker_open),
+            Some("inline_picker_visible"),
+            "an open picker must force full frames so selection changes paint"
+        );
+
+        // The palette guard is checked first when both are reported, so the
+        // reason stays stable for `draw-stats`.
+        let both = IdleAnimationFastPathInputs {
+            command_palette_visible: true,
+            inline_picker_visible: true,
+            ..clean_idle_frame
+        };
+        assert_eq!(
+            idle_animation_fast_path_blocked_reason(&both),
+            Some("command_palette_visible"),
         );
     }
 
