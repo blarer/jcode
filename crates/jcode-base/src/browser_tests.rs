@@ -368,3 +368,46 @@ fn completed_setup_without_the_binary_does_not_prompt() {
         true, false, false
     )));
 }
+
+#[test]
+fn bridge_browsers_include_firefox_compatible_browsers() {
+    // The bridge is a WebExtension plus a native messaging host, so browsers
+    // that implement Firefox's extension APIs (notably Orion) host it fine.
+    // Detecting only Firefox made jcode report a live bridge as unavailable.
+    let names: Vec<&str> = BRIDGE_BROWSERS
+        .iter()
+        .map(|browser| browser.process_name)
+        .collect();
+    assert!(names.contains(&"firefox"));
+    assert!(names.contains(&"orion"));
+    assert!(names.contains(&"librewolf"));
+}
+
+#[test]
+fn every_bridge_browser_resolves_a_native_messaging_host_dir() {
+    for browser in BRIDGE_BROWSERS {
+        let dir = browser_native_messaging_hosts_dir(browser)
+            .unwrap_or_else(|err| panic!("no host dir for {}: {err}", browser.app_name));
+        let leaf = dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        assert!(
+            leaf.contains("nativemessaginghosts") || leaf.contains("native-messaging-hosts"),
+            "unexpected host dir for {}: {}",
+            browser.app_name,
+            dir.display()
+        );
+        assert!(
+            dir.to_string_lossy().contains(browser.support_dir)
+                || dir
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .contains(&browser.support_dir.to_ascii_lowercase()),
+            "host dir for {} ignores its support dir: {}",
+            browser.app_name,
+            dir.display()
+        );
+    }
+}

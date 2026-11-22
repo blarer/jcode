@@ -10,6 +10,57 @@ const NATIVE_HOST_NAME: &str = "firefox_agent_bridge";
 const EXTENSION_ID_LISTED: &str = "browser-agent-bridge@1jehuang.github.io";
 const EXTENSION_ID_LOCAL: &str = "firefox-agent-bridge@local";
 
+/// A browser that can host the Firefox Agent Bridge extension.
+///
+/// The bridge is a WebExtension plus a native messaging host, so any browser
+/// that implements Firefox's WebExtension and native messaging APIs can run
+/// it. Orion, LibreWolf, Waterfox, Zen, and Floorp all load the same XPI and
+/// talk to the same host binary, so treating Firefox as the only possible host
+/// made jcode report a working bridge as unavailable on those browsers.
+pub struct BridgeBrowser {
+    /// Process name, matched case-insensitively.
+    pub process_name: &'static str,
+    /// macOS application name used to launch the browser.
+    pub app_name: &'static str,
+    /// Directory under the user's application support dir that holds the
+    /// browser's `NativeMessagingHosts` folder.
+    pub support_dir: &'static str,
+}
+
+/// Browsers checked for a running bridge host, in preference order.
+pub const BRIDGE_BROWSERS: &[BridgeBrowser] = &[
+    BridgeBrowser {
+        process_name: "firefox",
+        app_name: "Firefox",
+        support_dir: "Mozilla",
+    },
+    BridgeBrowser {
+        process_name: "orion",
+        app_name: "Orion",
+        support_dir: "Orion",
+    },
+    BridgeBrowser {
+        process_name: "librewolf",
+        app_name: "LibreWolf",
+        support_dir: "LibreWolf",
+    },
+    BridgeBrowser {
+        process_name: "waterfox",
+        app_name: "Waterfox",
+        support_dir: "Waterfox",
+    },
+    BridgeBrowser {
+        process_name: "zen",
+        app_name: "Zen",
+        support_dir: "Zen",
+    },
+    BridgeBrowser {
+        process_name: "floorp",
+        app_name: "Floorp",
+        support_dir: "Floorp",
+    },
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserStatus {
     pub backend: &'static str,
@@ -605,21 +656,6 @@ fn get_host_asset_name() -> String {
 }
 
 fn install_native_host_manifest() -> Result<bool> {
-    let manifest_dir = native_messaging_hosts_dir()?;
-    let manifest_path = manifest_dir.join(format!("{}.json", NATIVE_HOST_NAME));
-
-    // Check if an existing manifest is already valid (from independent install or previous setup)
-    if manifest_path.exists()
-        && let Ok(contents) = std::fs::read_to_string(&manifest_path)
-        && let Ok(existing) = serde_json::from_str::<serde_json::Value>(&contents)
-        && let Some(existing_path) = existing["path"].as_str()
-        && std::path::Path::new(existing_path).exists()
-    {
-        #[cfg(target_os = "windows")]
-        register_windows_native_host_manifest(&manifest_path)?;
-        return Ok(false);
-    }
-
     let host_path = host_binary_path();
     let browser_bin = browser_binary_path();
 
@@ -634,8 +670,6 @@ fn install_native_host_manifest() -> Result<bool> {
         return Err(anyhow::anyhow!("No browser binaries found"));
     };
 
-    std::fs::create_dir_all(&manifest_dir)?;
-
     let manifest = serde_json::json!({
         "name": NATIVE_HOST_NAME,
         "description": "Native host for Firefox Agent Bridge (managed by jcode)",
@@ -646,13 +680,117 @@ fn install_native_host_manifest() -> Result<bool> {
             EXTENSION_ID_LISTED,
         ]
     });
+    let manifest_text = serde_json::to_string_pretty(&manifest)?;
 
-    std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+    // Register with every Firefox-compatible browser that is installed, not
+    // just Firefox, so a user running Orion or LibreWolf gets a working host.
+    let mut wrote_any = false;
+    for browser in BRIDGE_BROWSERS {
+        let Ok(manifest_dir) = browser_native_messaging_hosts_dir(browser) else {
+            continue;
+        };
+        // Only create host directories for browsers the user actually has, but
+        // always refresh a directory that already exists.
+        if !manifest_dir.exists() && !browser_profile_dir_exists(browser) {
+            continue;
+        }
+        let manifest_path = manifest_dir.join(format!("{}.json", NATIVE_HOST_NAME));
 
+        // An existing manifest pointing at a real binary is already valid, and
+        // may come from an independent install we should not clobber.
+        if manifest_path.exists()
+            && let Ok(contents) = std::fs::read_to_string(&manifest_path)
+            && let Ok(existing) = serde_json::from_str::<serde_json::Value>(&contents)
+            && let Some(existing_path) = existing["path"].as_str()
+            && std::path::Path::new(existing_path).exists()
+        {
+            #[cfg(target_os = "windows")]
+            register_windows_native_host_manifest(&manifest_path)?;
+            continue;
+        }
+
+        std::fs::create_dir_all(&manifest_dir)?;
+        std::fs::write(&manifest_path, &manifest_text)?;
+        wrote_any = true;
+
+        #[cfg(target_os = "windows")]
+        register_windows_native_host_manifest(&manifest_path)?;
+    }
+
+    // Fall back to the Firefox location when no candidate browser was found,
+    // so a fresh machine still gets a manifest ready for a later install.
+    if !wrote_any && running_bridge_browser().is_none() {
+        let manifest_dir = native_messaging_hosts_dir()?;
+        let manifest_path = manifest_dir.join(format!("{}.json", NATIVE_HOST_NAME));
+        if !manifest_path.exists() {
+            std::fs::create_dir_all(&manifest_dir)?;
+            std::fs::write(&manifest_path, &manifest_text)?;
+            wrote_any = true;
+            #[cfg(target_os = "windows")]
+            register_windows_native_host_manifest(&manifest_path)?;
+        }
+    }
+
+    Ok(wrote_any)
+}
+
+/// Whether this browser already has the bridge's native messaging host
+/// manifest registered.
+fn browser_host_manifest_installed(browser: &BridgeBrowser) -> bool {
+    browser_native_messaging_hosts_dir(browser)
+        .map(|dir| dir.join(format!("{}.json", NATIVE_HOST_NAME)).exists())
+        .unwrap_or(false)
+}
+
+/// Whether the browser keeps a profile/support directory on this machine,
+/// which is the cheapest reliable signal that it is installed.
+fn browser_profile_dir_exists(browser: &BridgeBrowser) -> bool {
+    browser_support_dir(browser)
+        .map(|dir| dir.exists())
+        .unwrap_or(false)
+}
+
+fn browser_support_dir(browser: &BridgeBrowser) -> Result<PathBuf> {
+    let home = dirs::home_dir().context("No home directory")?;
+    #[cfg(target_os = "linux")]
+    {
+        // Linux Gecko browsers use dot-directories in $HOME, except Firefox
+        // which jcode already special-cases below.
+        if browser.support_dir == "Mozilla" {
+            return Ok(home.join(".mozilla"));
+        }
+        Ok(home.join(format!(".{}", browser.support_dir.to_ascii_lowercase())))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Ok(home
+            .join("Library")
+            .join("Application Support")
+            .join(browser.support_dir))
+    }
     #[cfg(target_os = "windows")]
-    register_windows_native_host_manifest(&manifest_path)?;
+    {
+        let appdata = dirs::data_dir().context("No app data directory")?;
+        let _ = home;
+        Ok(appdata.join(browser.support_dir))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (home, browser);
+        Err(anyhow::anyhow!("Unsupported platform for native messaging"))
+    }
+}
 
-    Ok(true)
+/// Native messaging host directory for one browser.
+fn browser_native_messaging_hosts_dir(browser: &BridgeBrowser) -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(browser_support_dir(browser)?.join("native-messaging-hosts"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(browser_support_dir(browser)?.join("NativeMessagingHosts"))
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -888,15 +1026,38 @@ fn should_prompt_extension_install(status: &BrowserStatus) -> bool {
     status.binary_installed && !status.responding
 }
 
-/// Whether a Firefox process appears to be running on this machine.
+/// The bridge-capable browser that is currently running, if any.
 ///
-/// A bridge that once completed setup but stopped responding usually means
-/// Firefox is simply closed, not that the install broke. Callers use this to
-/// launch Firefox instead of re-running one-time setup.
+/// A bridge that once completed setup but stopped responding usually means the
+/// browser is simply closed, not that the install broke. Callers use this to
+/// launch the browser instead of re-running one-time setup.
+pub fn running_bridge_browser() -> Option<&'static BridgeBrowser> {
+    BRIDGE_BROWSERS
+        .iter()
+        .find(|browser| is_browser_process_running(browser.process_name))
+}
+
+/// Display name of the running bridge-capable browser, for user-facing text.
+pub fn running_bridge_browser_name() -> Option<&'static str> {
+    running_bridge_browser().map(|browser| browser.app_name)
+}
+
+/// Whether any browser that can host the bridge extension is running.
+///
+/// Named for Firefox historically, this now accepts every Firefox-compatible
+/// browser in [`BRIDGE_BROWSERS`].
 pub fn is_firefox_running() -> bool {
+    running_bridge_browser().is_some()
+}
+
+fn is_browser_process_running(process_name: &str) -> bool {
     #[cfg(target_os = "linux")]
     {
-        const FIREFOX_PROCESS_NAMES: &[&str] = &["firefox", "firefox-bin", "firefox-esr"];
+        let candidates = [
+            process_name.to_string(),
+            format!("{}-bin", process_name),
+            format!("{}-esr", process_name),
+        ];
         let Ok(entries) = std::fs::read_dir("/proc") else {
             return false;
         };
@@ -907,7 +1068,7 @@ pub fn is_firefox_running() -> bool {
                 continue;
             }
             if let Ok(comm) = std::fs::read_to_string(entry.path().join("comm"))
-                && FIREFOX_PROCESS_NAMES.contains(&comm.trim())
+                && candidates.iter().any(|candidate| candidate == comm.trim())
             {
                 return true;
             }
@@ -917,7 +1078,7 @@ pub fn is_firefox_running() -> bool {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("pgrep")
-            .args(["-ix", "firefox"])
+            .args(["-ix", process_name])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -927,24 +1088,27 @@ pub fn is_firefox_running() -> bool {
     }
     #[cfg(target_os = "windows")]
     {
+        let image = format!("{}.exe", process_name);
         std::process::Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq firefox.exe", "/NH"])
+            .args(["/FI", &format!("IMAGENAME eq {}", image), "/NH"])
             .output()
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
                     .to_ascii_lowercase()
-                    .contains("firefox.exe")
+                    .contains(&image)
             })
             .unwrap_or(false)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
+        let _ = process_name;
         false
     }
 }
 
-/// Launch Firefox detached, without any install prompt. Returns whether a
-/// launch was started (not whether Firefox finished starting).
+/// Launch a bridge-capable browser detached, without any install prompt.
+/// Returns whether a launch was started (not whether the browser finished
+/// starting).
 fn launch_firefox_detached() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -952,6 +1116,10 @@ fn launch_firefox_detached() -> bool {
             &["firefox"],
             &["firefox-esr"],
             &["flatpak", "run", "org.mozilla.firefox"],
+            &["librewolf"],
+            &["waterfox"],
+            &["zen-browser"],
+            &["floorp"],
         ];
         for candidate in candidates {
             let mut cmd = std::process::Command::new(candidate[0]);
@@ -968,12 +1136,21 @@ fn launch_firefox_detached() -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        for args in [
-            ["-a", "Firefox"].as_slice(),
-            ["-b", "org.mozilla.firefox"].as_slice(),
-        ] {
+        // Prefer a browser that already has the bridge's native messaging host
+        // registered, so we revive the install the user actually set up.
+        let mut apps: Vec<&str> = BRIDGE_BROWSERS
+            .iter()
+            .filter(|browser| browser_host_manifest_installed(browser))
+            .map(|browser| browser.app_name)
+            .collect();
+        for browser in BRIDGE_BROWSERS {
+            if !apps.contains(&browser.app_name) {
+                apps.push(browser.app_name);
+            }
+        }
+        for app in apps {
             let launched = std::process::Command::new("open")
-                .args(args)
+                .args(["-a", app])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -988,14 +1165,16 @@ fn launch_firefox_detached() -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/C", "start", "", "firefox"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        if let Ok(child) = crate::platform::spawn_detached(&mut cmd) {
-            crate::platform::reap_detached(child);
-            return true;
+        for browser in BRIDGE_BROWSERS {
+            let mut cmd = std::process::Command::new("cmd");
+            cmd.args(["/C", "start", "", browser.process_name])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if let Ok(child) = crate::platform::spawn_detached(&mut cmd) {
+                crate::platform::reap_detached(child);
+                return true;
+            }
         }
         false
     }
@@ -1066,15 +1245,33 @@ async fn install_extension() -> Result<String> {
     {
         // macOS has no default handler for `.xpi` files, so a plain `open <url>`
         // fails with kLSApplicationNotFoundErr. Open the XPI directly with
-        // Firefox, which knows how to install extensions. Try the app name first,
-        // then fall back to the bundle id (covers Firefox installed under a
-        // non-default name or when it is not the default browser).
-        let opened = tokio::process::Command::new("open")
-            .args(["-a", "Firefox", &xpi_url])
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
+        // a browser that knows how to install extensions. Prefer the
+        // bridge-capable browser that is already running, then any other
+        // Firefox-compatible browser, then the Firefox bundle id.
+        let mut apps: Vec<&str> = Vec::new();
+        if let Some(running) = running_bridge_browser() {
+            apps.push(running.app_name);
+        }
+        for browser in BRIDGE_BROWSERS {
+            if !apps.contains(&browser.app_name) && browser_profile_dir_exists(browser) {
+                apps.push(browser.app_name);
+            }
+        }
+        if !apps.contains(&"Firefox") {
+            apps.push("Firefox");
+        }
+        let mut opened = false;
+        for app in apps {
+            opened = tokio::process::Command::new("open")
+                .args(["-a", app, &xpi_url])
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if opened {
+                break;
+            }
+        }
         if !opened {
             let opened_by_id = tokio::process::Command::new("open")
                 .args(["-b", "org.mozilla.firefox", &xpi_url])
@@ -1096,7 +1293,11 @@ async fn install_extension() -> Result<String> {
             .spawn();
     }
 
-    msg.push_str("       Opened Firefox with extension install prompt.\n");
+    let browser_label = running_bridge_browser_name().unwrap_or("Firefox");
+    msg.push_str(&format!(
+        "       Opened {} with extension install prompt.\n",
+        browser_label
+    ));
     msg.push_str("       Click \"Add\" when prompted to install the extension.\n");
 
     Ok(msg)

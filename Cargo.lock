@@ -3137,6 +3137,7 @@ dependencies = [
  "jcode-swarm-core",
  "jcode-task-types",
  "jcode-terminal-image",
+ "jcode-terminal-launch",
  "jcode-tool-core",
  "jcode-tool-types",
  "jcode-update-core",
