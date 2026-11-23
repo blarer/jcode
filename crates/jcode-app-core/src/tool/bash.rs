@@ -663,6 +663,18 @@ fn configure_non_interactive(command: &mut TokioCommand) {
     }
 }
 
+/// Give a tool command the terminal identity of the client that asked for it
+/// (TERM_PROGRAM, TMUX_PANE, REX_BLOCK, ...), not the identity the shared
+/// server inherited from whichever pane started it. Without this, `rex`,
+/// `tmux` or `zellij` commands an agent runs act on that stale pane.
+/// Outside a client scope (CLI one-shots, tests) the process env is left
+/// as it is.
+fn apply_client_terminal_env(command: &mut StdCommand) {
+    if let Some(env) = crate::hooks::current_client_terminal_env() {
+        crate::terminal_launch::apply_client_terminal_env(command, &env);
+    }
+}
+
 #[cfg(not(windows))]
 fn configure_tool_scratch(command: &mut TokioCommand) {
     if let Some(dir) = tool_scratch_dir() {
@@ -957,6 +969,7 @@ impl BashTool {
         let timeout_duration = Duration::from_millis(timeout_ms);
 
         let mut command = build_shell_command(&params.command);
+        apply_client_terminal_env(command.as_std_mut());
         command.envs(cloud_command_environment(ctx.working_dir.as_deref())?);
         command.envs(crate::session_env::session_env(&ctx.session_id));
         command
@@ -1107,6 +1120,7 @@ impl BashTool {
         let display_name = summarize_background_command(params.intent.as_deref(), &params.command);
 
         let mut cmd = build_detached_shell_wrapper(&params.command);
+        apply_client_terminal_env(&mut cmd);
         cmd.envs(cloud_command_environment(ctx.working_dir.as_deref())?);
         cmd.envs(crate::session_env::session_env(&ctx.session_id));
         cmd.env("JCODE_SESSION_ID", &ctx.session_id);
@@ -1252,6 +1266,8 @@ impl BashTool {
         // Capture before handing work to the manager. Its closure can start
         // after a caller has already replaced or cleared these overrides.
         let session_environment = crate::session_env::session_env(&ctx.session_id);
+        // Same reason: the manager's task does not inherit the task-local.
+        let client_terminal_env = crate::hooks::current_client_terminal_env();
         let timeout_ms = background_timeout_ms(params.timeout);
         let timeout_duration = timeout_ms.map(Duration::from_millis);
 
@@ -1268,6 +1284,9 @@ impl BashTool {
                     #[cfg(all(test, not(windows)))]
                     tests::wait_for_session_env_launch_gate(&session_id_env).await;
 					let mut cmd = build_shell_command(&command);
+					if let Some(env) = client_terminal_env.as_deref() {
+						crate::terminal_launch::apply_client_terminal_env(cmd.as_std_mut(), env);
+					}
 					cmd.envs(cloud_environment);
 					cmd.envs(session_environment);
 					cmd.env("JCODE_SESSION_ID", &session_id_env);

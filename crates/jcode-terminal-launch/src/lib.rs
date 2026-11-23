@@ -129,6 +129,15 @@ pub const CLIENT_TERMINAL_ENV_VARS: &[&str] = &[
     "HERDR_BIN_PATH",
     "HERDR_SESSION",
     "HERDR_AGENT",
+    // Rex terminal multiplexer (Superlogical). REX_SESSION and REX_BLOCK
+    // name the client's session and pane; REX_SERVER is the socket of the
+    // Rex server that owns them. Without these a shared jcode server hands
+    // `rex` commands the pane that happened to start the server, so
+    // `rex block inspect "$REX_BLOCK"` reports "not found" once that pane
+    // is gone.
+    "REX_SESSION",
+    "REX_BLOCK",
+    "REX_SERVER",
     // Terminal emulators
     "TERM",
     "TERM_PROGRAM",
@@ -858,6 +867,38 @@ mod tests {
             !env.iter().any(|(k, _)| k.starts_with("JCODE_CLIENT_")),
             "no client terminal env should produce no JCODE_CLIENT_* keys"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rex_pane_identity_is_forwarded_and_replaces_the_servers() {
+        let mut cmd = Command::new("/usr/bin/env");
+        // What the shared server inherited from the pane that started it.
+        cmd.env("REX_BLOCK", "block:server-pane");
+        cmd.env("REX_SESSION", "session:server");
+        let client = vec![
+            ("REX_BLOCK".to_string(), "block:client-pane".to_string()),
+            ("REX_SERVER".to_string(), "unix:///tmp/rex.sock".to_string()),
+        ];
+        apply_client_terminal_env(&mut cmd, &client);
+        let envs: std::collections::HashMap<_, _> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(envs["REX_BLOCK"].as_deref(), Some("block:client-pane"));
+        assert_eq!(
+            envs["JCODE_CLIENT_REX_BLOCK"].as_deref(),
+            Some("block:client-pane")
+        );
+        assert_eq!(envs["REX_SERVER"].as_deref(), Some("unix:///tmp/rex.sock"));
+        // A client that is not in a Rex session must not inherit the
+        // server's: the stale value is removed, not left in place.
+        assert_eq!(envs["REX_SESSION"], None);
     }
 
     #[test]

@@ -379,7 +379,16 @@ impl ActivityGate {
                 return None;
             }
         };
-        Some(tokio::spawn(reserved.scope(future)))
+        // Work spawned for a session runs on behalf of the client request
+        // that spawned it. tokio::spawn drops task-locals, so without this a
+        // tool task saw the shared server's terminal identity (the pane that
+        // started the server) instead of the requesting client's.
+        match crate::hooks::current_client_terminal_env() {
+            Some(env) => Some(tokio::spawn(
+                reserved.scope(crate::hooks::with_client_terminal_env(env, future)),
+            )),
+            None => Some(tokio::spawn(reserved.scope(future))),
+        }
     }
 }
 

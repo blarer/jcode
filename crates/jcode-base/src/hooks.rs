@@ -222,6 +222,16 @@ where
     CLIENT_TERMINAL_ENV.scope(env, future).await
 }
 
+/// The terminal identity of the client whose request is running, or `None`
+/// outside any [`with_client_terminal_env`] scope.
+///
+/// Task-local values do not cross `tokio::spawn`. Code that spawns work on
+/// behalf of a request (tool execution, background jobs) captures this before
+/// spawning and re-enters [`with_client_terminal_env`] inside the new task.
+pub fn current_client_terminal_env() -> Option<Vec<(String, String)>> {
+    CLIENT_TERMINAL_ENV.try_with(Clone::clone).ok()
+}
+
 /// The configured commands for `event`, in declaration order.
 pub fn hook_commands(event: &str) -> Vec<String> {
     if hooks_suppressed() {
