@@ -261,3 +261,79 @@ async fn manual_background_and_shutdown_do_not_wait_for_budget() {
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
 }
+
+/// Reports the REX_BLOCK the tool would hand a subprocess, read through the
+/// same accessor the bash tool uses.
+struct ClientEnvProbe;
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for ClientEnvProbe {
+    fn name(&self) -> &str {
+        "env_probe"
+    }
+    fn description(&self) -> &str {
+        "Client env probe"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object"})
+    }
+    async fn execute(
+        &self,
+        _: serde_json::Value,
+        _: ToolContext,
+    ) -> Result<crate::tool::ToolOutput> {
+        let block = crate::hooks::current_client_terminal_env()
+            .and_then(|env| {
+                env.into_iter()
+                    .find(|(key, _)| key == "REX_BLOCK")
+                    .map(|(_, value)| value)
+            })
+            .unwrap_or_else(|| "<none>".to_string());
+        Ok(crate::tool::ToolOutput::new(block))
+    }
+}
+
+/// A shared server runs each tool in a task spawned for it. Task-local client
+/// terminal env does not cross `tokio::spawn` by itself, so without carrying
+/// it a tool saw the server's own pane (or none) instead of the client's.
+#[tokio::test]
+async fn tool_task_sees_requesting_clients_terminal_env() {
+    for (client_block, expected) in [
+        (Some("block:client-a"), "block:client-a"),
+        (Some("block:client-b"), "block:client-b"),
+        (None, "<none>"),
+    ] {
+        let registry = Registry::empty();
+        registry
+            .register("env_probe".into(), Arc::new(ClientEnvProbe))
+            .await;
+        let ctx = ToolContext {
+            session_id: format!("client-env-probe-{expected}"),
+            message_id: "message".into(),
+            tool_call_id: "client-env-probe".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::Direct,
+        };
+        let run = execute_with_background_budget(
+            registry,
+            "env_probe".into(),
+            serde_json::json!({}),
+            ctx,
+            Duration::ZERO,
+        );
+        let result = match client_block {
+            Some(block) => {
+                crate::hooks::with_client_terminal_env(
+                    vec![("REX_BLOCK".to_string(), block.to_string())],
+                    run,
+                )
+                .await
+            }
+            None => run.await,
+        }
+        .unwrap();
+        assert_eq!(result.output, expected);
+    }
+}
