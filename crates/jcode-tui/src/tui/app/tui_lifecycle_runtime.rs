@@ -1,5 +1,4 @@
 use super::*;
-use crate::tui::connection_type_icon;
 
 impl App {
     /// Create an App instance for replay mode (playing back a saved session)
@@ -115,7 +114,13 @@ impl App {
             self.session.is_canary
         };
         let server_name = self.remote_server_short_name.as_deref().unwrap_or("jcode");
-        let icon = connection_type_icon(self.connection_type.as_deref()).unwrap_or(session_icon);
+        // The window title names the session, so it carries the session's own
+        // icon (cow -> 🐄). `connection_type` is the model provider's transport
+        // ("https/sse", "websocket"), not anything about this session, and
+        // used to replace the icon here: every session streaming over HTTPS
+        // showed 🌐, so tabs could not be told apart. The header made the same
+        // change earlier (ui_header.rs, build_persistent_header_with_auth).
+        let icon = session_icon;
         let session_label = crate::process_title::terminal_session_label(&session_name, None);
         let fallback_label = if server_name.eq_ignore_ascii_case("jcode") {
             format!("jcode {session_label}")
