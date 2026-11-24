@@ -668,6 +668,32 @@ pub(crate) struct VisibleCopyTarget {
 // movement keys while the user is scanning visible actions.
 const COPY_BADGE_KEYS: [char; 12] = ['s', 'd', 'f', 'g', 'w', 'e', 'r', 't', 'x', 'c', 'v', 'b'];
 
+/// Letters never handed out from `display.copy_badge_keys`: vi movement, the
+/// expand badge (e), the inline image toggle (i) and the flicker notice (z).
+const COPY_BADGE_RESERVED: [char; 7] = ['h', 'j', 'k', 'l', 'e', 'i', 'z'];
+
+/// Copy badge keys from `display.copy_badge_keys`, or the default set when it
+/// is empty or names no usable letter. Lowercased, deduplicated, reserved
+/// letters and non-letters dropped.
+pub(crate) fn copy_badge_keys_from_config(configured: &str) -> Vec<char> {
+    let mut keys: Vec<char> = Vec::new();
+    for c in configured.chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_lowercase() && !COPY_BADGE_RESERVED.contains(&c) && !keys.contains(&c) {
+            keys.push(c);
+        }
+    }
+    if keys.is_empty() {
+        COPY_BADGE_KEYS.to_vec()
+    } else {
+        keys
+    }
+}
+
+pub(crate) fn copy_badge_keys() -> Vec<char> {
+    copy_badge_keys_from_config(&crate::config::config().display.copy_badge_keys)
+}
+
 #[cfg(not(test))]
 static VISIBLE_COPY_TARGETS: OnceLock<Mutex<Vec<VisibleCopyTarget>>> = OnceLock::new();
 

@@ -78,6 +78,10 @@ pub struct DisplayConfig {
     pub compact_notifications: bool,
     /// Override the Alt/Option label shown in copy badges. Empty = auto (⌥ on macOS, Alt elsewhere).
     pub copy_badge_alt_label: String,
+    /// Letters used for copy badge shortcuts (Alt+Shift+<letter>), in the
+    /// order badges are assigned. Empty = built-in default. Letters jcode
+    /// reserves (h/j/k/l, e, i, z) and non-letters are skipped.
+    pub copy_badge_keys: String,
     /// Show the full agentgrep tool output inline in the transcript instead of
     /// just the one-line summary (default: false)
     #[serde(default)]
@@ -235,6 +239,7 @@ impl Default for DisplayConfig {
             prompt_preview: true,
             compact_notifications: false,
             copy_badge_alt_label: String::new(),
+            copy_badge_keys: String::new(),
             show_agentgrep_output: false,
             show_bash_output: false,
             tool_call_details: false,

@@ -329,6 +329,9 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_COPY_BADGE_ALT_LABEL") {
             self.display.copy_badge_alt_label = v;
         }
+        if let Ok(v) = std::env::var("JCODE_COPY_BADGE_KEYS") {
+            self.display.copy_badge_keys = v;
+        }
         if let Ok(v) = std::env::var("JCODE_COMPACT_NOTIFICATIONS") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.compact_notifications = parsed;
