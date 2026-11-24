@@ -1043,3 +1043,40 @@ fn jev_recall_prefilter_leaves_small_stores_untouched() {
         10
     );
 }
+
+/// Measures the real prefilter against a labelled store when one is supplied:
+/// JCODE_PREFILTER_EVAL=<json {"store": path, "items": [{"query", "golds"}]}>.
+/// Prints how many items keep a gold memory. Ignored by default.
+#[test]
+#[ignore]
+fn jev_recall_prefilter_measured_on_labelled_store() {
+    let Ok(path) = std::env::var("JCODE_PREFILTER_EVAL") else {
+        return;
+    };
+    let spec: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let graph: crate::memory_graph::MemoryGraph =
+        serde_json::from_slice(&fs::read(spec["store"].as_str().unwrap()).unwrap()).unwrap();
+    let entries: Vec<MemoryEntry> = graph.active_memories().cloned().collect();
+    let mut kept_gold = 0;
+    let mut answerable = 0;
+    for item in spec["items"].as_array().unwrap() {
+        let golds: Vec<&str> = item["golds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|g| g.as_str())
+            .collect();
+        if golds.is_empty() {
+            continue;
+        }
+        answerable += 1;
+        let kept = prefilter_for_jev(entries.clone(), item["query"].as_str().unwrap());
+        if kept.iter().any(|e| golds.contains(&e.id.as_str())) {
+            kept_gold += 1;
+        }
+    }
+    println!(
+        "prefilter kept a gold memory for {kept_gold}/{answerable} (store {}, budget {MAX_JEV_RECALL_CANDIDATES})",
+        entries.len()
+    );
+}
