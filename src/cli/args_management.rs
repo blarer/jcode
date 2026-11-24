@@ -190,6 +190,21 @@ pub(crate) enum MemoryCommand {
         semantic: bool,
     },
 
+    /// Show which memories models have been given most, and which are unused
+    Top {
+        /// How many memories to list
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+
+        /// Scope (project, global, all)
+        #[arg(short, long, default_value = "all")]
+        scope: String,
+
+        /// Also list memories older than this many days that were never used
+        #[arg(long)]
+        unused_days: Option<i64>,
+    },
+
     /// Export memories to a JSON file
     Export {
         /// Output file path

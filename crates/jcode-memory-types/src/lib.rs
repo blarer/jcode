@@ -271,6 +271,10 @@ pub struct MemoryEntry {
     /// Confidence score (0.0-1.0) - decays over time, boosted by use
     #[serde(default = "default_confidence")]
     pub confidence: f32,
+    /// When this memory was last given to a model (injected or recalled).
+    /// Separate from `updated_at` so use does not look like an edit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<DateTime<Utc>>,
 }
 
 /// Model id used for memories embedded before model tagging existed. These were
@@ -328,6 +332,7 @@ impl MemoryEntry {
             embedding: None,
             embedding_model: None,
             confidence: 1.0,
+            last_used_at: None,
         }
     }
 
@@ -411,6 +416,13 @@ impl MemoryEntry {
     pub fn touch(&mut self) {
         self.updated_at = Utc::now();
         self.access_count += 1;
+    }
+
+    /// Count one use of this memory by a model. Does not change `updated_at`,
+    /// so pending-injection snapshots and recency ordering are unaffected.
+    pub fn record_use(&mut self, at: DateTime<Utc>) {
+        self.access_count = self.access_count.saturating_add(1);
+        self.last_used_at = Some(at);
     }
 
     /// Reinforce this memory (called when same info is encountered again)

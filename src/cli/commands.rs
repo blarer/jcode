@@ -1554,6 +1554,11 @@ pub enum MemorySubcommand {
         query: String,
         semantic: bool,
     },
+    Top {
+        limit: usize,
+        scope: String,
+        unused_days: Option<i64>,
+    },
     Export {
         output: String,
         scope: String,
@@ -1765,6 +1770,76 @@ async fn run_memory_command_for_dir(
             }
 
             println!("Imported {} memories ({} skipped)", imported, skipped);
+        }
+
+        MemorySubcommand::Top {
+            limit,
+            scope,
+            unused_days,
+        } => {
+            let mut all: Vec<(MemoryEntry, &'static str)> = Vec::new();
+            if scope == "all" || scope == "project" {
+                all.extend(
+                    manager
+                        .load_project_graph()?
+                        .active_memories()
+                        .cloned()
+                        .map(|entry| (entry, "project")),
+                );
+            }
+            if scope == "all" || scope == "global" {
+                all.extend(
+                    manager
+                        .load_global_graph()?
+                        .active_memories()
+                        .cloned()
+                        .map(|entry| (entry, "global")),
+                );
+            }
+            let total = all.len();
+            let used = all.iter().filter(|(e, _)| e.access_count > 0).count();
+            println!("{used} of {total} active memories have been used at least once.");
+            println!(
+                "Counts before this version came from the old embedding recall; \
+                 last-used dates start with this version.\n"
+            );
+            all.sort_by(|a, b| {
+                b.0.access_count
+                    .cmp(&a.0.access_count)
+                    .then_with(|| b.0.last_used_at.cmp(&a.0.last_used_at))
+            });
+            for (entry, where_) in all.iter().filter(|(e, _)| e.access_count > 0).take(limit) {
+                let last = entry
+                    .last_used_at
+                    .map(|t| t.format("%Y-%m-%d").to_string())
+                    .unwrap_or_else(|| "-".into());
+                let text: String = entry.content.chars().take(90).collect();
+                println!(
+                    "{:>5}  {:<10}  {:<7}  {}  {}",
+                    entry.access_count, last, where_, entry.id, text
+                );
+            }
+            if let Some(days) = unused_days {
+                let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
+                let stale: Vec<_> = all
+                    .iter()
+                    .filter(|(e, _)| e.access_count == 0 && e.created_at < cutoff)
+                    .collect();
+                println!(
+                    "\n{} never-used memories older than {days} days.",
+                    stale.len()
+                );
+                for (entry, where_) in stale.iter().take(limit) {
+                    let text: String = entry.content.chars().take(90).collect();
+                    println!(
+                        "  {}  {:<7}  {}  {}",
+                        entry.created_at.format("%Y-%m-%d"),
+                        where_,
+                        entry.id,
+                        text
+                    );
+                }
+            }
         }
 
         MemorySubcommand::Stats => {

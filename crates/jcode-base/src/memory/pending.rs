@@ -255,6 +255,10 @@ fn take_pending_memory_inner(
             return None;
         }
     }
+    let use_project_dir = queued
+        .binding
+        .as_ref()
+        .and_then(|binding| binding.project_dir.clone());
     let pending = queued.pending;
 
     // If every memory in this payload is still fresh in the session's
@@ -308,6 +312,21 @@ fn take_pending_memory_inner(
 
     if !pending.memory_ids.is_empty() {
         mark_memories_injected(session_id, &pending.memory_ids);
+        // Usage counters: best effort, never blocks or fails the injection.
+        let ids = pending.memory_ids.clone();
+        let project_dir = use_project_dir;
+        let session = session_id.to_string();
+        std::thread::spawn(move || {
+            let manager = match project_dir {
+                Some(dir) => super::MemoryManager::new().with_project_dir(dir),
+                None => super::MemoryManager::new(),
+            };
+            if let Err(error) = manager.record_use(&ids) {
+                crate::logging::info(&format!(
+                    "memory use counters not updated for {session}: {error}"
+                ));
+            }
+        });
     }
 
     crate::memory_log::log_pending_consumed(

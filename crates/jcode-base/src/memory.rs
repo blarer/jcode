@@ -1363,6 +1363,39 @@ impl MemoryManager {
         Ok(())
     }
 
+    /// Count one model use of each memory ID: bump `access_count`, set
+    /// `last_used_at`. IDs not found in either store are ignored (forgotten
+    /// between selection and use). Each store is written once at most.
+    pub fn record_use(&self, ids: &[String]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let now = chrono::Utc::now();
+        let mut counted = 0;
+        let mut project = self.load_project_graph()?;
+        let mut project_dirty = false;
+        let mut global = self.load_global_graph()?;
+        let mut global_dirty = false;
+        for id in ids {
+            if let Some(entry) = project.get_memory_mut(id) {
+                entry.record_use(now);
+                project_dirty = true;
+                counted += 1;
+            } else if let Some(entry) = global.get_memory_mut(id) {
+                entry.record_use(now);
+                global_dirty = true;
+                counted += 1;
+            }
+        }
+        if project_dirty {
+            self.save_project_graph(&project)?;
+        }
+        if global_dirty {
+            self.save_global_graph(&global)?;
+        }
+        Ok(counted)
+    }
+
     /// Add a tag to a memory
     pub fn tag_memory(&self, memory_id: &str, tag: &str) -> Result<()> {
         // Try project first
