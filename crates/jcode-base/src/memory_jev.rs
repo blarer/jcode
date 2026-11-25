@@ -1,5 +1,6 @@
-//! Direct, fail-closed typed relevance selection. No embeddings, lexical prefilter,
-//! sidecar, cached answers, or recent-memory cap are used.
+//! Direct, fail-closed typed relevance selection. No embeddings, sidecar,
+//! cached answers, or recent-memory cap are used. Stores larger than
+//! `MAX_JEV_RECALL_CANDIDATES` are narrowed lexically (BM25) before judging.
 //!
 //! Requests are sequential and the entire selection has a deadline. Oversized
 //! individual memories are skipped (and counted in a content-free log), never
@@ -66,6 +67,10 @@ pub async fn recall(
     if entries.is_empty() {
         return Ok(Vec::new());
     }
+    // Large stores are narrowed lexically first, as automatic recall does, so
+    // explicit recall over a few thousand memories fits SELECTION_TIMEOUT
+    // (3 decision batches instead of ~118 for the ~2,800-memory home store).
+    let entries = crate::memory::prefilter_for_jev(entries, query);
     select(&JevClient::new()?, query, entries, limit).await
 }
 

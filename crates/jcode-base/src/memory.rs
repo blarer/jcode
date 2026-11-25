@@ -1593,7 +1593,8 @@ pub(crate) const MAX_JEV_RECALL_CANDIDATES: usize = 72;
 
 #[path = "memory/ranking.rs"]
 mod ranking;
-use ranking::{bm25_rank, prefilter_for_jev};
+use ranking::bm25_rank;
+pub(crate) use ranking::prefilter_for_jev;
 impl Default for MemoryManager {
     fn default() -> Self {
         Self::new()
