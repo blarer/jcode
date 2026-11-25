@@ -246,6 +246,13 @@ impl Tool for MemoryTool {
                             query: truncate_for_widget(&query, 40),
                             count: results.len(),
                         });
+                        let recalled_ids: Vec<String> =
+                            results.iter().map(|(entry, _)| entry.id.clone()).collect();
+                        if let Err(error) = manager.record_use(&recalled_ids) {
+                            crate::logging::info(&format!(
+                                "memory use counters not updated after recall: {error}"
+                            ));
+                        }
                         memory::set_state(MemoryState::Idle);
 
                         if results.is_empty() {

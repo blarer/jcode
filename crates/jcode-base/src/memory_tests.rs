@@ -14,6 +14,47 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub(super) static PENDING_MEMORY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn record_use_counts_each_scope_without_touching_updated_at() {
+    with_temp_home(|_| {
+        let manager = MemoryManager::new().with_project_dir("/record-use");
+        let project = manager
+            .remember_project(MemoryEntry::new(MemoryCategory::Fact, "project fact"))
+            .unwrap();
+        let global = manager
+            .remember_global(MemoryEntry::new(MemoryCategory::Fact, "global fact"))
+            .unwrap();
+        let before = manager
+            .load_project_graph()
+            .unwrap()
+            .get_memory(&project)
+            .unwrap()
+            .clone();
+        let counted = manager
+            .record_use(&[project.clone(), global.clone(), "missing".into()])
+            .unwrap();
+        assert_eq!(counted, 2);
+        manager.record_use(std::slice::from_ref(&project)).unwrap();
+        let after = manager
+            .load_project_graph()
+            .unwrap()
+            .get_memory(&project)
+            .unwrap()
+            .clone();
+        assert_eq!(after.access_count, before.access_count + 2);
+        assert!(after.last_used_at.is_some());
+        assert_eq!(after.updated_at, before.updated_at);
+        let global_after = manager
+            .load_global_graph()
+            .unwrap()
+            .get_memory(&global)
+            .unwrap()
+            .clone();
+        assert_eq!(global_after.access_count, 1);
+        assert_eq!(manager.record_use(&[]).unwrap(), 0);
+    });
+}
+
+#[test]
 fn jev_storage_preserves_code_spelling_and_scope_without_embeddings() {
     with_temp_home(|_| {
         let manager = MemoryManager::new().with_project_dir("/jev-storage");

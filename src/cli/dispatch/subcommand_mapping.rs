@@ -8,6 +8,15 @@ pub(super) fn map_memory_subcommand(subcmd: MemoryCommand) -> commands::MemorySu
         MemoryCommand::Search { query, semantic } => {
             commands::MemorySubcommand::Search { query, semantic }
         }
+        MemoryCommand::Top {
+            limit,
+            scope,
+            unused_days,
+        } => commands::MemorySubcommand::Top {
+            limit,
+            scope,
+            unused_days,
+        },
         MemoryCommand::Export { output, scope } => {
             commands::MemorySubcommand::Export { output, scope }
         }
