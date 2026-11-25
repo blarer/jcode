@@ -14,6 +14,8 @@ impl Default for AgentsConfig {
             browser_jev_model: None,
             voice_jev_model: None,
             memory_jev_threshold: default_memory_jev_threshold(),
+            memory_jev_cutoff: default_memory_jev_cutoff(),
+            memory_jev_max_results: None,
             memory_model: None,
             memory_sidecar_enabled: default_memory_sidecar_enabled(),
             memory_rerank_cadence: default_memory_rerank_cadence(),

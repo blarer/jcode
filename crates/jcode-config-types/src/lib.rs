@@ -621,9 +621,20 @@ pub struct AgentsConfig {
     pub browser_jev_model: Option<String>,
     /// Optional model override for voice Jev Decisions.
     pub voice_jev_model: Option<String>,
-    /// Minimum Jev relevance probability. Invalid values fail closed.
+    /// Jev relevance floor (0.3..=1.0). In `threshold` mode every returned
+    /// memory must reach it. In `top_k` mode only the best memory must reach
+    /// it, and then the top results are returned. Invalid values fail closed.
+    /// Env: `JCODE_MEMORY_JEV_THRESHOLD`.
     #[serde(default = "default_memory_jev_threshold")]
     pub memory_jev_threshold: f32,
+    /// Recall cutoff: `threshold` (default) or `top_k`. Unknown values fail
+    /// closed. Env: `JCODE_MEMORY_JEV_CUTOFF`.
+    #[serde(default = "default_memory_jev_cutoff")]
+    pub memory_jev_cutoff: String,
+    /// Optional cap on recalled memories, applied on top of the caller's
+    /// limit. Unset keeps the caller's limit. Env: `JCODE_MEMORY_JEV_MAX_RESULTS`.
+    #[serde(default)]
+    pub memory_jev_max_results: Option<usize>,
     /// Optional model override for memory extraction only, never recall.
     pub memory_model: Option<String>,
     /// Whether optional automatic memory extraction may use a text-generating
@@ -694,6 +705,10 @@ fn default_memory_jev_provider() -> String {
 
 fn default_memory_jev_threshold() -> f32 {
     0.8
+}
+
+fn default_memory_jev_cutoff() -> String {
+    "threshold".to_string()
 }
 
 fn default_memory_sidecar_enabled() -> bool {

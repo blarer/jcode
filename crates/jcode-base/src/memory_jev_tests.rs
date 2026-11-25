@@ -282,7 +282,7 @@ async fn dynamic_batches_preserve_full_unicode_contents_and_skip_oversize_whole(
 #[tokio::test]
 async fn invalid_threshold_or_large_query_is_fail_closed() {
     let mock = Mock::default();
-    for threshold in [f32::NAN, f32::INFINITY, -1.0, 0.79, 1.01] {
+    for threshold in [f32::NAN, f32::INFINITY, -1.0, 0.29, 1.01] {
         assert!(
             select_with_transport(&mock, "q", vec![entry("a", "relevant")], 1, threshold)
                 .await
@@ -394,6 +394,100 @@ async fn threshold_is_applied_before_rounding_and_results_sort_by_score() {
         .unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].0.id, "c_high");
+}
+
+#[tokio::test]
+async fn lower_threshold_is_accepted_and_still_applies_to_every_result() {
+    let entries = vec![
+        entry("a_low", "0.4"),
+        entry("b_mid", "0.55"),
+        entry("c_high", "0.9"),
+    ];
+    let result = select_with_transport(&NumericScores, "q", entries, 10, 0.5)
+        .await
+        .unwrap();
+    assert_eq!(
+        result
+            .iter()
+            .map(|(e, _)| e.id.as_str())
+            .collect::<Vec<_>>(),
+        ["c_high", "b_mid"]
+    );
+}
+
+#[tokio::test]
+async fn top_k_returns_best_results_only_when_the_best_reaches_the_floor() {
+    let policy = RecallPolicy::new(Cutoff::TopK, 0.5, None).unwrap();
+    let entries = vec![
+        entry("a", "0.2"),
+        entry("b", "0.45"),
+        entry("c", "0.6"),
+        entry("d", "0.1"),
+    ];
+    let result = select_with_policy(&NumericScores, "q", entries, 3, &policy)
+        .await
+        .unwrap();
+    // Below-floor memories ride along once the best one qualifies.
+    assert_eq!(
+        result
+            .iter()
+            .map(|(e, _)| e.id.as_str())
+            .collect::<Vec<_>>(),
+        ["c", "b", "a"]
+    );
+
+    // An unrelated query whose best candidate is weak still gets nothing.
+    let weak = vec![entry("a", "0.2"), entry("b", "0.49")];
+    let result = select_with_policy(&NumericScores, "q", weak, 3, &policy)
+        .await
+        .unwrap();
+    assert!(result.is_empty());
+}
+
+#[tokio::test]
+async fn max_results_caps_the_callers_limit() {
+    let policy = RecallPolicy::new(Cutoff::TopK, 0.5, Some(2)).unwrap();
+    let entries = vec![entry("a", "0.9"), entry("b", "0.8"), entry("c", "0.7")];
+    let result = select_with_policy(&NumericScores, "q", entries.clone(), 10, &policy)
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 2);
+    // A caller asking for fewer than the cap is not widened.
+    let result = select_with_policy(&NumericScores, "q", entries, 1, &policy)
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 1);
+}
+
+#[test]
+fn recall_policy_from_config_defaults_to_threshold_and_fails_closed() {
+    let agents = crate::config::AgentsConfig::default();
+    assert_eq!(
+        RecallPolicy::from_config(&agents).unwrap(),
+        RecallPolicy {
+            cutoff: Cutoff::Threshold,
+            floor: 0.8,
+            max_results: None
+        }
+    );
+    let mut top_k = agents.clone();
+    top_k.memory_jev_cutoff = "top_k".into();
+    top_k.memory_jev_threshold = 0.5;
+    top_k.memory_jev_max_results = Some(5);
+    assert_eq!(
+        RecallPolicy::from_config(&top_k).unwrap(),
+        RecallPolicy {
+            cutoff: Cutoff::TopK,
+            floor: 0.5,
+            max_results: Some(5)
+        }
+    );
+    let mut unknown = agents.clone();
+    unknown.memory_jev_cutoff = "everything".into();
+    assert!(RecallPolicy::from_config(&unknown).is_err());
+    let mut too_low = agents;
+    too_low.memory_jev_threshold = 0.1;
+    assert!(RecallPolicy::from_config(&too_low).is_err());
 }
 
 #[tokio::test]
@@ -518,4 +612,44 @@ async fn private_metadata_stays_local_but_full_original_is_returned() {
     assert!(candidate.get("source").is_none());
     assert!(candidate.get("id").is_none());
     assert!(candidate.get("embedding").is_none());
+}
+
+/// Measurement harness, not an acceptance gate: runs the real explicit-recall
+/// path (BM25 narrowing, live Jev, configured cutoff) over a labelled snapshot
+/// of a memory store and prints one JSON line per query. The spec at
+/// `JCODE_RECALL_EVAL` is `{store, global?, items:[{qid, query, golds}]}`;
+/// empty `golds` marks a query that should recall nothing.
+#[tokio::test]
+#[ignore = "requires JCODE_RECALL_EVAL and live Jev credentials"]
+async fn live_recall_measured_on_labelled_store() -> Result<()> {
+    let Ok(path) = std::env::var("JCODE_RECALL_EVAL") else {
+        return Ok(());
+    };
+    let spec: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    let mut entries = Vec::new();
+    for key in ["store", "global"] {
+        if let Some(path) = spec[key].as_str() {
+            let graph: MemoryGraph = serde_json::from_slice(&std::fs::read(path)?)?;
+            entries.extend(graph.active_memories().cloned());
+        }
+    }
+    let client = JevClient::new()?;
+    let policy = RecallPolicy::from_config(&crate::config::config().agents)?;
+    eprintln!("recall eval policy={policy:?} store={}", entries.len());
+    for item in spec["items"].as_array().context("items")? {
+        let query = item["query"].as_str().context("query")?;
+        let started = std::time::Instant::now();
+        let selected = recall_from_entries(&client, query, entries.clone(), 10).await?;
+        println!(
+            "{}",
+            json!({
+                "qid": item["qid"],
+                "golds": item["golds"],
+                "selected": selected.iter().map(|(e, _)| e.id.clone()).collect::<Vec<_>>(),
+                "scores": selected.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
+                "ms": started.elapsed().as_millis() as u64,
+            })
+        );
+    }
+    Ok(())
 }

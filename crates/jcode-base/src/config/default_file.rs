@@ -688,8 +688,17 @@ swarm_stall_after_secs = 600
 # memory_jev_model = "typesafe/jev-1.14"
 # browser_jev_model = "typesafe/jev-1.14"
 # voice_jev_model = "typesafe/jev-1.14"
-# Minimum relevance probability (0.8..=1.0). Invalid values fail closed.
+# Relevance floor (0.3..=1.0). Invalid values fail closed.
+# Env override: JCODE_MEMORY_JEV_THRESHOLD
 # memory_jev_threshold = 0.8
+# Recall cutoff. "threshold": every recalled memory must reach the floor.
+# "top_k": if the best memory reaches the floor, return the best few
+# regardless of their own scores (more useful memories found, more
+# unrelated ones injected). Env override: JCODE_MEMORY_JEV_CUTOFF
+# memory_jev_cutoff = "threshold"
+# Optional cap on recalled memories (unset = caller's limit).
+# Env override: JCODE_MEMORY_JEV_MAX_RESULTS
+# memory_jev_max_results = 5
 # BYOK: OPENROUTER_API_KEY, TYPESAFE_API_KEY, or AIMLAPI_API_KEY.
 # Jcode requires an eligible subscription and gateway memory_jev capability.
 # With a Jcode login and an older gateway, explicitly select a BYOK provider.

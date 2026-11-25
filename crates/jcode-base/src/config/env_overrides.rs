@@ -458,6 +458,24 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
             self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
         }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_CUTOFF") {
+            self.agents.memory_jev_cutoff = v.trim().to_ascii_lowercase();
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_THRESHOLD") {
+            // Unparseable values become NaN so recall fails closed instead of
+            // silently keeping the file's setting.
+            self.agents.memory_jev_threshold = v.trim().parse::<f32>().unwrap_or(f32::NAN);
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_MAX_RESULTS") {
+            // Empty clears the cap. Unparseable values are ignored: keeping the
+            // file's cap can never widen recall.
+            let v = v.trim();
+            if v.is_empty() {
+                self.agents.memory_jev_max_results = None;
+            } else if let Ok(cap) = v.parse::<usize>() {
+                self.agents.memory_jev_max_results = Some(cap);
+            }
+        }
         for (key, target) in [
             ("JCODE_MEMORY_JEV_MODEL", &mut self.agents.memory_jev_model),
             (
