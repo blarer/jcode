@@ -519,16 +519,17 @@ pub(super) fn draw_messages(
 
     let mut visible_copy_targets: Vec<VisibleCopyTarget> = Vec::new();
     let mut badge_assignments: Vec<(usize, char)> = Vec::new();
+    let badge_keys = copy_badge_keys();
     let first_visible_copy_target = prepared
         .copy_targets
         .partition_point(|target| target.end_line <= scroll);
     for (slot, target) in prepared.copy_targets[first_visible_copy_target..]
         .iter()
         .take_while(|target| target.start_line < visible_end)
-        .take(COPY_BADGE_KEYS.len())
+        .take(badge_keys.len())
         .enumerate()
     {
-        let key = COPY_BADGE_KEYS[slot];
+        let key = badge_keys[slot];
         visible_copy_targets.push(VisibleCopyTarget {
             key,
             kind_label: target.kind.label(),

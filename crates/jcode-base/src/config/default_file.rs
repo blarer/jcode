@@ -330,6 +330,11 @@ prompt_entry_animation = true
 # Empty = auto ("⌥" on macOS, "Alt" elsewhere). Examples: "Option", "Alt", "⌥".
 # copy_badge_alt_label = ""
 
+# Letters for copy badge shortcuts (Alt+Shift+<letter>), assigned in order.
+# Empty = default "sdfgwertxcvb". Use this when those chords clash with a
+# window manager. h/j/k/l, e, i and z are reserved and skipped.
+# copy_badge_keys = ""
+
 # Color theme: "auto" (query the terminal background), "dark", or "light".
 # Auto follows light/dark changes during the session (refreshes every 5 seconds).
 # theme = "auto"

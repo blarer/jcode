@@ -108,6 +108,18 @@ fn tail_follow_backward_motion_snaps() {
 }
 
 #[test]
+fn copy_badge_keys_default_and_override() {
+    let default = crate::tui::ui::copy_badge_keys_from_config("");
+    assert_eq!(default.iter().collect::<String>(), "sdfgwertxcvb");
+    // Reserved letters, duplicates and non-letters are dropped; case folds.
+    let custom = crate::tui::ui::copy_badge_keys_from_config("Y U-hjkleiz y o");
+    assert_eq!(custom.iter().collect::<String>(), "yuo");
+    // Nothing usable falls back to the default set.
+    let none = crate::tui::ui::copy_badge_keys_from_config("hjkl");
+    assert_eq!(none, default);
+}
+
+#[test]
 fn default_copy_badge_alt_label_matches_platform() {
     #[cfg(target_os = "macos")]
     assert_eq!(super::copy_badge_alt_label_from_config(""), "⌥");
