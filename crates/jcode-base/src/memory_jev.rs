@@ -26,6 +26,11 @@ pub trait RelevanceTransport: Send + Sync {
         DEFAULT_MODEL
     }
 
+    /// Budget for one whole selection, across all of its batches.
+    fn selection_timeout(&self) -> Duration {
+        SELECTION_TIMEOUT
+    }
+
     async fn evaluate(&self, state: Value, questions: Map<String, Value>) -> Result<Value>;
 }
 
@@ -35,8 +40,23 @@ impl RelevanceTransport for JevClient {
         JevClient::model_id(self)
     }
 
+    fn selection_timeout(&self) -> Duration {
+        selection_timeout_for(JevClient::request_timeout(self))
+    }
+
     async fn evaluate(&self, state: Value, questions: Map<String, Value>) -> Result<Value> {
         JevClient::evaluate(self, state, questions).await
+    }
+}
+
+/// A route whose single request may outlast the normal budget (a self-hosted
+/// model loading on first use) gets that wait on top, so the batches after the
+/// slow first one still have their usual time.
+fn selection_timeout_for(request_timeout: Duration) -> Duration {
+    if request_timeout > SELECTION_TIMEOUT {
+        request_timeout + SELECTION_TIMEOUT
+    } else {
+        SELECTION_TIMEOUT
     }
 }
 
@@ -303,7 +323,7 @@ pub async fn select_with_policy<T: RelevanceTransport + ?Sized>(
     // Compare before f32 rounding, using the configured decimal threshold.
     // A provider score just below the floor must not round up into acceptance.
     let threshold: f64 = policy.floor.to_string().parse()?;
-    tokio::time::timeout(SELECTION_TIMEOUT, async {
+    tokio::time::timeout(transport.selection_timeout(), async {
         // Canonical tie order independent of graph HashMap iteration and recency.
         let mut keyed = entries
             .into_iter()
