@@ -42,6 +42,14 @@ pub(crate) const MAX_QUESTIONS: usize = 24;
 /// Typesafe direct accepts far more (256 verified live on 2026-09-23). A voice
 /// request has at most 26 questions, so it always fits in one round trip.
 const TYPESAFE_MAX_QUESTIONS: usize = 64;
+/// Hosted providers answer in about a second, so this only bounds a hung
+/// connection.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
+/// A self-hosted Laya server may unload its model when idle and load it again
+/// on the next request, holding that request open for the whole load (66 s
+/// measured for a 4B model on 2026-11-25). Giving up at 25 s turned every
+/// first recall after an idle period into a failure.
+const LAYA_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Typesafe latency is bimodal and sticky per connection: a connection is
 /// served in ~150ms or 2-12s (measured live 2026-09-23). Voice waits on this
@@ -137,6 +145,13 @@ impl JevProvider {
                 crate::subscription_catalog::JCODE_API_KEY_ENV,
                 crate::subscription_catalog::JCODE_ENV_FILE,
             ),
+        }
+    }
+
+    fn request_timeout(self) -> Duration {
+        match self {
+            Self::Laya => LAYA_REQUEST_TIMEOUT,
+            _ => REQUEST_TIMEOUT,
         }
     }
 
@@ -248,7 +263,7 @@ impl JevClient {
         let (provider, api_key, endpoint, me_endpoint) = Self::resolve(purpose)?;
         let bypass_proxy = should_bypass_proxy(provider, &endpoint);
         let build = || {
-            client_builder_for(bypass_proxy)
+            client_builder_for(bypass_proxy, provider.request_timeout())
                 .build()
                 .map_err(|_| anyhow!("Could not initialize the Jev decision client"))
         };
@@ -308,6 +323,11 @@ impl JevClient {
 
     pub fn model_id(&self) -> &str {
         &self.model_id
+    }
+
+    /// How long one decision request may take on this route.
+    pub fn request_timeout(&self) -> Duration {
+        self.provider.request_timeout()
     }
 
     /// Largest question batch this route accepts in one request.
@@ -551,13 +571,13 @@ fn retry_after(response: &Response) -> Option<Duration> {
 
 #[cfg(test)]
 fn client_builder() -> reqwest::ClientBuilder {
-    client_builder_for(false)
+    client_builder_for(false, REQUEST_TIMEOUT)
 }
 
-fn client_builder_for(bypass_proxy: bool) -> reqwest::ClientBuilder {
+fn client_builder_for(bypass_proxy: bool, request_timeout: Duration) -> reqwest::ClientBuilder {
     let builder = Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(25))
+        .timeout(request_timeout)
         .redirect(reqwest::redirect::Policy::none());
     if bypass_proxy {
         builder.no_proxy()
@@ -802,6 +822,24 @@ mod tests {
     pub(super) fn browser_questions() -> Map<String, Value> {
         json!({"action": {"type": "choice", "instructions": "Choose the next browser action", "criteria": {"click": "Click the button", "stop": "Return control"}}})
             .as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn only_the_self_hosted_route_waits_for_a_cold_model() {
+        // Hosted routes keep the short bound; a slow hosted call is a fault.
+        for provider in [
+            JevProvider::OpenRouter,
+            JevProvider::TypeSafe,
+            JevProvider::Aimlapi,
+            JevProvider::Jcode,
+        ] {
+            assert_eq!(provider.request_timeout(), Duration::from_secs(25));
+        }
+        // A self-hosted server may load its model on this request.
+        assert_eq!(
+            JevProvider::Laya.request_timeout(),
+            Duration::from_secs(120)
+        );
     }
 
     #[test]

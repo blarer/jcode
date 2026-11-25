@@ -101,6 +101,21 @@ fn payload_keeps_untrusted_data_out_of_instructions_and_identifies_each_candidat
 }
 
 #[test]
+fn selection_budget_grows_only_for_a_route_that_can_load_a_cold_model() {
+    // Hosted routes: one request fits inside the budget, so it is unchanged.
+    assert_eq!(
+        selection_timeout_for(Duration::from_secs(25)),
+        SELECTION_TIMEOUT
+    );
+    // Self-hosted: the cold first request is added on top, so the batches
+    // after it keep their usual time.
+    assert_eq!(
+        selection_timeout_for(Duration::from_secs(120)),
+        Duration::from_secs(120) + SELECTION_TIMEOUT
+    );
+}
+
+#[test]
 fn strict_answer_mapping_and_numeric_validation() {
     let response = json!({"answers":{
         "candidate_1":{"type":"noul","noul":0.3},
