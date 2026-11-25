@@ -26,6 +26,11 @@ pub trait RelevanceTransport: Send + Sync {
         DEFAULT_MODEL
     }
 
+    /// Budget for one whole selection, across all of its batches.
+    fn selection_timeout(&self) -> Duration {
+        SELECTION_TIMEOUT
+    }
+
     async fn evaluate(&self, state: Value, questions: Map<String, Value>) -> Result<Value>;
 }
 
@@ -35,8 +40,23 @@ impl RelevanceTransport for JevClient {
         JevClient::model_id(self)
     }
 
+    fn selection_timeout(&self) -> Duration {
+        selection_timeout_for(JevClient::request_timeout(self))
+    }
+
     async fn evaluate(&self, state: Value, questions: Map<String, Value>) -> Result<Value> {
         JevClient::evaluate(self, state, questions).await
+    }
+}
+
+/// A route whose single request may outlast the normal budget (a self-hosted
+/// model loading on first use) gets that wait on top, so the batches after the
+/// slow first one still have their usual time.
+fn selection_timeout_for(request_timeout: Duration) -> Duration {
+    if request_timeout > SELECTION_TIMEOUT {
+        request_timeout + SELECTION_TIMEOUT
+    } else {
+        SELECTION_TIMEOUT
     }
 }
 
@@ -64,6 +84,18 @@ pub async fn recall(
     }
     validate_query(query)?;
     let entries = collect_scoped(manager, scope)?;
+    recall_from_entries(&JevClient::new()?, query, entries, limit).await
+}
+
+/// The explicit-recall path after the store has been read: lexical narrowing,
+/// then judging under the configured cutoff. Split out so the labelled-store
+/// measurement exercises exactly what `recall` does.
+pub async fn recall_from_entries<T: RelevanceTransport + ?Sized>(
+    transport: &T,
+    query: &str,
+    entries: Vec<MemoryEntry>,
+    limit: usize,
+) -> Result<Vec<(MemoryEntry, f32)>> {
     if entries.is_empty() {
         return Ok(Vec::new());
     }
@@ -71,7 +103,8 @@ pub async fn recall(
     // explicit recall over a few thousand memories fits SELECTION_TIMEOUT
     // (3 decision batches instead of ~118 for the ~2,800-memory home store).
     let entries = crate::memory::prefilter_for_jev(entries, query);
-    select(&JevClient::new()?, query, entries, limit).await
+    let policy = RecallPolicy::from_config(&crate::config::config().agents)?;
+    select_with_policy(transport, query, entries, limit, &policy).await
 }
 
 pub async fn select(
@@ -80,14 +113,75 @@ pub async fn select(
     entries: Vec<MemoryEntry>,
     limit: usize,
 ) -> Result<Vec<(MemoryEntry, f32)>> {
-    select_with_transport(
-        client,
-        query,
-        entries,
-        limit,
-        crate::config::config().agents.memory_jev_threshold,
-    )
-    .await
+    let policy = RecallPolicy::from_config(&crate::config::config().agents)?;
+    select_with_policy(client, query, entries, limit, &policy).await
+}
+
+/// How judged candidates become recalled memories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cutoff {
+    /// Every returned memory must score at least the floor.
+    Threshold,
+    /// If the best memory scores at least the floor, return the best `limit`
+    /// memories whatever their own scores; otherwise return nothing. Trades
+    /// precision for recall: the right memory is often ranked near the top
+    /// with a modest score.
+    TopK,
+}
+
+/// Lowest accepted floor. On 37 labelled real queries (2026-11-24), top-k
+/// recall stopped improving below 0.4 while unrelated queries kept getting
+/// memories, so lower values are treated as misconfiguration.
+pub const MIN_FLOOR: f32 = 0.3;
+
+/// Validated recall settings. Construction fails closed on bad config rather
+/// than silently widening what is injected.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecallPolicy {
+    pub cutoff: Cutoff,
+    pub floor: f32,
+    pub max_results: Option<usize>,
+}
+
+impl RecallPolicy {
+    pub fn new(cutoff: Cutoff, floor: f32, max_results: Option<usize>) -> Result<Self> {
+        ensure!(
+            floor.is_finite() && (MIN_FLOOR..=1.0).contains(&floor),
+            "Jev memory threshold must be between 0.3 and 1"
+        );
+        Ok(Self {
+            cutoff,
+            floor,
+            max_results,
+        })
+    }
+
+    /// The default: every result must reach `floor`.
+    pub fn threshold(floor: f32) -> Result<Self> {
+        Self::new(Cutoff::Threshold, floor, None)
+    }
+
+    pub fn from_config(agents: &crate::config::AgentsConfig) -> Result<Self> {
+        let cutoff = match agents
+            .memory_jev_cutoff
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "threshold" => Cutoff::Threshold,
+            "top_k" | "topk" | "top-k" => Cutoff::TopK,
+            _ => anyhow::bail!("Jev memory cutoff must be \"threshold\" or \"top_k\""),
+        };
+        Self::new(
+            cutoff,
+            agents.memory_jev_threshold,
+            agents.memory_jev_max_results,
+        )
+    }
+
+    fn effective_limit(&self, limit: usize) -> usize {
+        self.max_results.map_or(limit, |cap| cap.min(limit))
+    }
 }
 
 fn validate_query(query: &str) -> Result<()> {
@@ -199,8 +293,7 @@ pub fn parse_scores(response: &Value, count: usize) -> Result<Vec<f64>> {
         .collect()
 }
 
-/// Select across *all* active entries. Threshold must be finite and in [0.8, 1]
-/// so a misconfiguration cannot accidentally enable low-precision injection.
+/// Select across *all* active entries with a plain score threshold.
 pub async fn select_with_transport<T: RelevanceTransport + ?Sized>(
     transport: &T,
     query: &str,
@@ -208,18 +301,29 @@ pub async fn select_with_transport<T: RelevanceTransport + ?Sized>(
     limit: usize,
     threshold: f32,
 ) -> Result<Vec<(MemoryEntry, f32)>> {
+    let policy = RecallPolicy::threshold(threshold)?;
+    select_with_policy(transport, query, entries, limit, &policy).await
+}
+
+/// Select across *all* active entries under `policy`.
+pub async fn select_with_policy<T: RelevanceTransport + ?Sized>(
+    transport: &T,
+    query: &str,
+    entries: Vec<MemoryEntry>,
+    limit: usize,
+    policy: &RecallPolicy,
+) -> Result<Vec<(MemoryEntry, f32)>> {
+    // Validate even when there is nothing to judge, so bad config is visible.
+    let policy = RecallPolicy::new(policy.cutoff, policy.floor, policy.max_results)?;
+    let limit = policy.effective_limit(limit);
     if limit == 0 || query.trim().is_empty() || entries.is_empty() {
         return Ok(Vec::new());
     }
     validate_query(query)?;
-    ensure!(
-        threshold.is_finite() && (0.8..=1.0).contains(&threshold),
-        "Jev memory threshold must be between 0.8 and 1"
-    );
     // Compare before f32 rounding, using the configured decimal threshold.
-    // A provider score just below 0.8 must not round up into acceptance.
-    let threshold: f64 = threshold.to_string().parse()?;
-    tokio::time::timeout(SELECTION_TIMEOUT, async {
+    // A provider score just below the floor must not round up into acceptance.
+    let threshold: f64 = policy.floor.to_string().parse()?;
+    tokio::time::timeout(transport.selection_timeout(), async {
         // Canonical tie order independent of graph HashMap iteration and recency.
         let mut keyed = entries
             .into_iter()
@@ -257,11 +361,12 @@ pub async fn select_with_transport<T: RelevanceTransport + ?Sized>(
             let (state, questions) = build_batch_for_model(query, &batch, transport.model_id())?;
             let response = transport.evaluate(state, questions).await?;
             let scores = parse_scores(&response, batch.len())?;
+            let keep_all = policy.cutoff == Cutoff::TopK;
             selected.extend(
                 batch
                     .into_iter()
                     .zip(scores)
-                    .filter(|(_, score)| *score >= threshold),
+                    .filter(|(_, score)| keep_all || *score >= threshold),
             );
         }
         if skipped > 0 {
@@ -271,6 +376,13 @@ pub async fn select_with_transport<T: RelevanceTransport + ?Sized>(
         }
         // Stable sort retains canonical order for equal relevance scores.
         selected.sort_by(|a, b| b.1.total_cmp(&a.1));
+        // Top-k is gated on the best score only: an unrelated query whose best
+        // candidate is weak still gets nothing.
+        if policy.cutoff == Cutoff::TopK
+            && selected.first().is_none_or(|(_, best)| *best < threshold)
+        {
+            selected.clear();
+        }
         selected.truncate(limit);
         Ok(selected
             .into_iter()
